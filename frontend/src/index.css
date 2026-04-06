@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 220 20% 7%;
+  --foreground: 40 20% 95%;
+  --primary: 28 100% 54%;
+  --accent: 45 100% 51%;
+  --card: 220 18% 11%;
+  --muted: 220 14% 15%;
+  --sold: 142 70% 45%;
+  --destructive: 0 72% 51%;
+
+  --ring-safe: var(--sold);
+  --ring-danger: var(--destructive);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  overflow-x: hidden;
+}
+
+::selection {
+  background: hsl(var(--primary) / 0.35);
+}
+
+.display {
+  font-family: "Bebas Neue", system-ui, sans-serif;
+  letter-spacing: 0.04em;
+}
+
+.price-glow {
+  text-shadow: 0 0 22px hsl(var(--primary) / 0.35);
+}
+
+.card {
+  background: linear-gradient(
+    180deg,
+    hsl(var(--card) / 0.98),
+    hsl(var(--card) / 0.92)
+  );
+  border: 1px solid hsl(220 16% 18%);
+  border-radius: 16px;
+}
+
+.subtle-grid {
+  background-image:
+    radial-gradient(hsl(var(--foreground) / 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.stage-hero-bg {
+  background:
+    linear-gradient(180deg, hsl(208 89% 85% / 0.2), hsl(205 70% 44% / 0.4)),
+    linear-gradient(180deg, hsl(220 18% 6% / 0.55), hsl(220 20% 5% / 0.8)),
+    url("https://images.unsplash.com/photo-1461896836934-ffe607ba8211?auto=format&fit=crop&w=1800&q=80");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.stage-hero-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 16%, hsl(0 0% 100% / 0.22), transparent 40%),
+    radial-gradient(circle at 50% 92%, hsl(220 40% 3% / 0.75), transparent 58%);
+}
+
+.results-banner-bg {
+  background:
+    linear-gradient(180deg, hsl(210 90% 80% / 0.25), hsl(210 60% 28% / 0.45)),
+    linear-gradient(180deg, hsl(220 18% 8% / 0.5), hsl(220 20% 7% / 0.82)),
+    url("https://images.unsplash.com/photo-1540747913346-19e32dc3e97e?auto=format&fit=crop&w=1800&q=80");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+

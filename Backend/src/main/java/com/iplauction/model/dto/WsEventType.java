@@ -1,0 +1,18 @@
+package com.iplauction.model.dto;
+
+public enum WsEventType {
+  ROOM_CREATED,
+  USER_JOINED,
+  AUCTION_STARTED,
+  NEW_PLAYER,
+  BID_PLACED,
+  TIMER_UPDATE,
+  PLAYER_SOLD,
+  PLAYER_UNSOLD,
+  NEXT_PLAYER,
+  AUCTION_ENDED,
+  ROOM_CLOSED,
+  ROOM_STATE,
+  ERROR
+}
+
