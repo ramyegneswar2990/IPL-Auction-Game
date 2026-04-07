@@ -30,6 +30,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadLocalRandom;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -51,6 +53,15 @@ public class AuctionService {
 
   private final Map<String, Object> roomLocks = new ConcurrentHashMap<>();
   private final ScheduledExecutorService delayedExecutor = Executors.newSingleThreadScheduledExecutor();
+
+  /** Per round: roomCode + playerIndex -> teamId -> bid count / target (3–5 bids per bot per player). */
+  private final Map<String, ConcurrentHashMap<String, Integer>> botBidCountsByRound =
+      new ConcurrentHashMap<>();
+
+  private final Map<String, ConcurrentHashMap<String, Integer>> botBidTargetsByRound =
+      new ConcurrentHashMap<>();
+
+  @Lazy @Autowired private AuctionService self;
 
   @Transactional
   public void startAuction(String roomCode, String sessionId) {
@@ -83,6 +94,8 @@ public class AuctionService {
     List<String> ids = new ArrayList<>(allPlayers.stream().map(Player::getId).toList());
     Collections.shuffle(ids);
     room.setPlayerOrder(RoomService.toPlayerOrder(ids));
+
+    clearBotRoundStateForRoom(roomCode);
 
     room.setCurrentPlayerIndex(0);
     Player p = playerRepository.findById(ids.get(0)).orElseThrow();
@@ -281,7 +294,9 @@ public class AuctionService {
         return;
       }
 
+      int previousIndex = room.getCurrentPlayerIndex();
       room.setCurrentPlayerIndex(nextIndex);
+      clearBotRoundStateForPlayer(roomCode, previousIndex);
       Player nextPlayer = playerRepository.findById(ids.get(nextIndex)).orElseThrow();
       room.setCurrentBid(nextPlayer.getBasePrice());
       room.setCurrentBidderId(null);
@@ -293,6 +308,7 @@ public class AuctionService {
       broadcast(roomCode, WsEventType.NEXT_PLAYER, roomService.buildRoomState(room));
       broadcast(roomCode, WsEventType.NEW_PLAYER, roomService.buildRoomState(room));
       timerService.startOrReset(roomCode, 10);
+      scheduleBotBidIfNeeded(roomCode);
     }
   }
 
@@ -301,6 +317,7 @@ public class AuctionService {
     AuctionRoom room = roomRepository.findByRoomCode(roomCode).orElse(null);
     if (room == null) return;
 
+    clearBotRoundStateForRoom(roomCode);
     timerService.cancel(roomCode);
     room.setStatus(RoomStatus.ENDED);
     roomRepository.save(room);
@@ -387,83 +404,134 @@ public class AuctionService {
 
   private void scheduleBotBidIfNeeded(String roomCode) {
     delayedExecutor.schedule(
-        () -> {
-          try {
-            maybeBotBidNow(roomCode);
-          } catch (Exception ignored) {
-          }
-        },
-        ThreadLocalRandom.current().nextInt(2000, 4001),
+        () -> maybeBotBidNow(roomCode),
+        ThreadLocalRandom.current().nextInt(350, 950),
         TimeUnit.MILLISECONDS);
   }
 
-  @Transactional
-  protected void maybeBotBidNow(String roomCode) {
+  private static String roundKey(String roomCode, int playerIndex) {
+    return roomCode + ":" + playerIndex;
+  }
+
+  private void clearBotRoundStateForRoom(String roomCode) {
+    String prefix = roomCode + ":";
+    botBidCountsByRound.keySet().removeIf(k -> k.startsWith(prefix));
+    botBidTargetsByRound.keySet().removeIf(k -> k.startsWith(prefix));
+  }
+
+  private void clearBotRoundStateForPlayer(String roomCode, int playerIndex) {
+    String rk = roundKey(roomCode, playerIndex);
+    botBidCountsByRound.remove(rk);
+    botBidTargetsByRound.remove(rk);
+  }
+
+  /**
+   * Each bot aims for 3–5 successful bids per current player. Uses {@link #self} so {@link #placeBid}
+   * runs through the Spring proxy (transaction + broadcasts). Reschedules after each player via
+   * {@link #nextPlayer} and {@link #startAuction}.
+   */
+  private void maybeBotBidNow(String roomCode) {
     synchronized (lock(roomCode)) {
       boolean keepRunning = false;
       try {
         AuctionRoom room = roomRepository.findByRoomCode(roomCode).orElse(null);
-        if (room == null || room.getStatus() != RoomStatus.ACTIVE) return;
+        if (room == null || room.getStatus() != RoomStatus.ACTIVE) {
+          return;
+        }
         keepRunning = true;
-        if (room.getTimerSeconds() <= 1) return;
-
-        Player currentPlayer = roomService.resolveCurrentPlayer(room);
-        if (currentPlayer == null) return;
-
-        List<Team> bots =
-            teamRepository.findByRoomCode(roomCode).stream()
-                .filter(t -> t.isBot() || (!t.isHost() && t.getSessionId() == null))
-                .filter(t -> !t.getId().equals(room.getCurrentBidderId()))
-                .toList();
-        if (bots.isEmpty()) return;
-
-        Collections.shuffle(bots);
-        int competitors = Math.min(Math.max(2, ThreadLocalRandom.current().nextInt(2, 4)), bots.size());
-
-        int bidsPlaced = 0;
-        for (Team bot : bots) {
-          if (bidsPlaced >= competitors) break;
-
-          double aggression = aggressionFor(bot.getId());
-          int currentBid = room.getCurrentBid();
-          int minRequired = currentBid + 10;
-          if (bot.getPurse() < minRequired) continue;
-
-          // Hard cap by player value: once too expensive (>5x base), most bots stop.
-          if (currentBid > currentPlayer.getBasePrice() * 5 && ThreadLocalRandom.current().nextDouble() > 0.2) {
-            continue;
-          }
-
-          // Purse protection: if next bid would exceed 70% purse, likely pass.
-          double projectedRatio = (double) minRequired / (double) bot.getPurse();
-          if (projectedRatio > 0.7 && ThreadLocalRandom.current().nextDouble() < 0.75) {
-            continue;
-          }
-
-          // Aggressive bots bid more often.
-          double bidChance = 0.20 + (aggression * 0.70);
-          if (ThreadLocalRandom.current().nextDouble() > bidChance) continue;
-
-          List<Integer> possible = new ArrayList<>();
-          for (int inc : BOT_INCREMENTS) {
-            if (currentBid + inc <= bot.getPurse()) {
-              possible.add(inc);
-            }
-          }
-          if (possible.isEmpty()) continue;
-
-          int increment = chooseIncrement(possible, aggression);
-          placeBid(roomCode, bot.getId(), increment);
-          bidsPlaced += 1;
+        if (room.getTimerSeconds() <= 1) {
+          return;
         }
 
-        if (bidsPlaced == 0) {
-          List<Team> affordable =
-              bots.stream().filter(t -> t.getPurse() >= room.getCurrentBid() + 10).toList();
-          if (!affordable.isEmpty()) {
-            Team forced = affordable.get(ThreadLocalRandom.current().nextInt(affordable.size()));
-            placeBid(roomCode, forced.getId(), 10);
+        Player currentPlayer = roomService.resolveCurrentPlayer(room);
+        if (currentPlayer == null) {
+          return;
+        }
+
+        List<Team> bots =
+            teamRepository.findByRoomCode(roomCode).stream().filter(Team::isBot).toList();
+        if (bots.isEmpty()) {
+          keepRunning = false;
+          return;
+        }
+
+        String rk = roundKey(roomCode, room.getCurrentPlayerIndex());
+        ConcurrentHashMap<String, Integer> counts =
+            botBidCountsByRound.computeIfAbsent(rk, k -> new ConcurrentHashMap<>());
+        ConcurrentHashMap<String, Integer> targets =
+            botBidTargetsByRound.computeIfAbsent(rk, k -> new ConcurrentHashMap<>());
+
+        for (Team b : bots) {
+          targets.computeIfAbsent(
+              b.getId(), id -> ThreadLocalRandom.current().nextInt(3, 6)); // 3..5 inclusive
+        }
+
+        room = roomRepository.findByRoomCode(roomCode).orElse(null);
+        if (room == null || room.getStatus() != RoomStatus.ACTIVE) {
+          return;
+        }
+
+        String bidderId = room.getCurrentBidderId();
+        int currentBid = room.getCurrentBid();
+
+        List<Team> candidates = new ArrayList<>();
+        for (Team bot : bots) {
+          if (bot.getId().equals(bidderId)) {
+            continue;
           }
+          int target = targets.getOrDefault(bot.getId(), 3);
+          if (counts.getOrDefault(bot.getId(), 0) >= target) {
+            continue;
+          }
+          int minRequired = currentBid + 10;
+          if (bot.getPurse() < minRequired) {
+            continue;
+          }
+          if (currentBid > currentPlayer.getBasePrice() * 6) {
+            continue;
+          }
+          candidates.add(bot);
+        }
+
+        if (candidates.isEmpty()) {
+          boolean allSatisfied =
+              bots.stream()
+                  .allMatch(
+                      b ->
+                          counts.getOrDefault(b.getId(), 0)
+                              >= targets.getOrDefault(b.getId(), 3));
+          if (allSatisfied) {
+            keepRunning = false;
+          }
+          return;
+        }
+
+        Collections.shuffle(candidates);
+        Team bot = candidates.get(0);
+        double aggression = aggressionFor(bot.getId());
+
+        room = roomRepository.findByRoomCode(roomCode).orElse(null);
+        if (room == null || room.getStatus() != RoomStatus.ACTIVE) {
+          return;
+        }
+        currentBid = room.getCurrentBid();
+
+        List<Integer> possible = new ArrayList<>();
+        for (int inc : BOT_INCREMENTS) {
+          if (currentBid + inc <= bot.getPurse()) {
+            possible.add(inc);
+          }
+        }
+        if (possible.isEmpty()) {
+          return;
+        }
+
+        int increment = chooseIncrement(possible, aggression);
+        try {
+          self.placeBid(roomCode, bot.getId(), increment);
+          counts.merge(bot.getId(), 1, Integer::sum);
+        } catch (AuctionException ex) {
+          // Stale price or became highest bidder; next tick will retry.
         }
       } finally {
         if (keepRunning) {
