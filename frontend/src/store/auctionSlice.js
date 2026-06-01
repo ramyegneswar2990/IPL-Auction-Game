@@ -153,7 +153,11 @@ const auctionSlice = createSlice({
           return { ...initialState }
         }
         case 'ERROR': {
-          state.error = msg.payload?.message || 'Error'
+          const message = msg.payload?.message || 'Error'
+          state.error = message
+          if (import.meta.env.DEV) {
+            console.error('[auction] server error:', message, msg)
+          }
           break
         }
         default:

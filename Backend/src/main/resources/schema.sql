@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS teams (
     purse INT DEFAULT 12000,
     is_host BOOLEAN DEFAULT FALSE,
     has_passed BOOLEAN DEFAULT FALSE,
+    is_bot BOOLEAN DEFAULT FALSE,
     session_id VARCHAR(100),
     FOREIGN KEY (room_id) REFERENCES auction_rooms(id) ON DELETE CASCADE
 );

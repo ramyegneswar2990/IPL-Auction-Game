@@ -18,6 +18,9 @@ import com.iplauction.service.RoomService;
 import jakarta.validation.Valid;
 import java.security.Principal;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
@@ -26,6 +29,7 @@ import org.springframework.stereotype.Controller;
 
 @Controller
 @RequiredArgsConstructor
+@Slf4j
 public class AuctionWebSocketController {
 
   private final RoomService roomService;
@@ -91,8 +95,34 @@ public class AuctionWebSocketController {
 
   @MessageExceptionHandler
   public void handleException(Throwable ex, Principal principal) {
-    String message = ex instanceof AuctionException ? ex.getMessage() : "Unexpected error";
+    if (ex instanceof AuctionException) {
+      sendToUser(
+          principal, WsEventType.ERROR, ErrorResponse.builder().message(ex.getMessage()).build());
+      return;
+    }
+    log.warn("WebSocket handler failed", ex);
+    String message = resolveClientMessage(ex);
     sendToUser(principal, WsEventType.ERROR, ErrorResponse.builder().message(message).build());
+  }
+
+  private static String resolveClientMessage(Throwable ex) {
+    for (Throwable t = ex; t != null; t = t.getCause()) {
+      if (t instanceof AuctionException) {
+        return t.getMessage();
+      }
+      if (t instanceof CannotGetJdbcConnectionException
+          || t instanceof DataAccessResourceFailureException) {
+        return "Database is not available. Start MySQL on port 3307 (docker compose up mysql) and restart the backend.";
+      }
+      String msg = t.getMessage();
+      if (msg != null
+          && (msg.contains("Communications link failure")
+              || msg.contains("Connection refused")
+              || msg.contains("Connection is not available"))) {
+        return "Database is not available. Start MySQL on port 3307 (docker compose up mysql) and restart the backend.";
+      }
+    }
+    return "Unexpected error";
   }
 
   private void sendToUser(Principal principal, WsEventType type, Object payload) {
